@@ -1,6 +1,7 @@
 import boto3
 import requests
-from openai import OpenAI
+import time
+from openai import OpenAI, RateLimitError
 
 from config import (
     CLOUD_REGION,
@@ -15,7 +16,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 
 def analyze_log_group(name: str) -> str:
-    """Get AI analysis of a log group"""
+    """Get AI analysis of a log group with retry logic"""
     prompt = f"""Analyze this AWS CloudWatch log group: {name}
 
 Please provide a brief analysis covering:
@@ -25,21 +26,47 @@ Please provide a brief analysis covering:
 
 Keep it concise (2-3 sentences)."""
     
-    try:
-        print(f"🤖 Getting AI analysis for: {name}")
-        resp = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=150,
-            temperature=0.3
-        )
-        result = resp.choices[0].message.content.strip()
-        print("✅ AI analysis complete")
-        return result
-    except Exception as e:
-        error_msg = f"❌ Error getting AI analysis: {str(e)}"
-        print(error_msg)
-        return error_msg
+    max_retries = 4
+    base_delay = 1
+
+    for attempt in range(max_retries):
+        try:
+            print(f"🤖 Getting AI analysis for: {name} (attempt {attempt + 1})")
+            resp = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=150,
+                temperature=0.3
+            )
+            result = resp.choices[0].message.content.strip()
+            print("✅ AI analysis complete")
+            return result
+
+        except RateLimitError as e:
+            error_msg = str(e).lower()
+            
+            # Check for quota/billing issues
+            if any(keyword in error_msg for keyword in ['quota', 'billing', 'insufficient', 'exceeded your current']):
+                alert = f"🚨 *OpenAI API Quota Issue* 🚨\n\nStopped processing log group: `{name}`\nError: {str(e)}"
+                post_to_slack(alert)
+                print(f"❌ OpenAI quota exceeded: {e}")
+                raise RuntimeError(f"OpenAI quota exceeded: {e}")
+
+            # Regular rate limiting - exponential backoff
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                print(f"⏳ Rate limited (attempt {attempt + 1}/{max_retries}), retrying in {delay}s...")
+                time.sleep(delay)
+            else:
+                print("❌ Max retries exceeded for rate limiting")
+                raise RuntimeError("Max retries exceeded for rate limiting")
+
+        except Exception as e:
+            error_msg = f"❌ Error getting AI analysis: {str(e)[:100]}..."
+            print(error_msg)
+            return error_msg
+
+    return "Failed to analyze after multiple attempts"
 
 
 def post_to_slack(text: str):
