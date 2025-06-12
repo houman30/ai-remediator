@@ -1,12 +1,45 @@
 import boto3
 import requests
+from openai import OpenAI
 
 from config import (
     CLOUD_REGION,
     CLOUD_ACCESS_KEY,
     CLOUD_SECRET_KEY,
+    OPENAI_API_KEY,
     SLACK_WEBHOOK_URL,
 )
+
+# Configure the OpenAI client
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+
+def analyze_log_group(name: str) -> str:
+    """Get AI analysis of a log group"""
+    prompt = f"""Analyze this AWS CloudWatch log group: {name}
+
+Please provide a brief analysis covering:
+1. What type of AWS service this likely belongs to
+2. What kind of logs it probably contains
+3. Any potential issues or patterns to monitor
+
+Keep it concise (2-3 sentences)."""
+    
+    try:
+        print(f"🤖 Getting AI analysis for: {name}")
+        resp = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=150,
+            temperature=0.3
+        )
+        result = resp.choices[0].message.content.strip()
+        print("✅ AI analysis complete")
+        return result
+    except Exception as e:
+        error_msg = f"❌ Error getting AI analysis: {str(e)}"
+        print(error_msg)
+        return error_msg
 
 
 def post_to_slack(text: str):
@@ -37,19 +70,30 @@ if __name__ == "__main__":
     print("🚀 Starting AI-Driven Log Remediation Tool")
     
     # Send startup notification to Slack
-    post_to_slack("🤖 AI Log Remediation Started - Checking CloudWatch log groups...")
+    post_to_slack("🤖 AI Log Remediation Started - Analyzing CloudWatch log groups...")
     
     groups = fetch_log_groups()
     print(f"Found {len(groups)} log groups")
     
     if groups:
-        message = f"📊 Found {len(groups)} CloudWatch log groups:\n"
-        for i, group in enumerate(groups[:3]):  # Show first 3
-            log_name = group['logGroupName']
-            print(f"{i+1}. {log_name}")
-            message += f"• {log_name}\n"
+        # Analyze the first log group
+        first_group = groups[0]
+        log_name = first_group['logGroupName']
         
-        post_to_slack(message)
+        print(f"Analyzing: {log_name}")
+        analysis = analyze_log_group(log_name)
+        
+        # Send analysis to Slack
+        slack_msg = f"""📊 *Log Group Analysis*
+
+*Log Group:* `{log_name}`
+
+*🤖 AI Analysis:*
+{analysis}
+"""
+        post_to_slack(slack_msg)
+        print("✅ Analysis complete!")
+        
     else:
         no_groups_msg = "🔍 No CloudWatch log groups found in the region."
         print(no_groups_msg)
