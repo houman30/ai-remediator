@@ -1,6 +1,7 @@
 import boto3
 import requests
 import time
+import logging
 from openai import OpenAI, RateLimitError
 
 from config import (
@@ -10,6 +11,10 @@ from config import (
     OPENAI_API_KEY,
     SLACK_WEBHOOK_URL,
 )
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Configure the OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -31,7 +36,7 @@ Keep it concise (2-3 sentences)."""
 
     for attempt in range(max_retries):
         try:
-            print(f"🤖 Getting AI analysis for: {name} (attempt {attempt + 1})")
+            logger.info(f"Calling OpenAI API for log group: {name} (attempt {attempt + 1})")
             resp = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[{"role": "user", "content": prompt}],
@@ -39,7 +44,7 @@ Keep it concise (2-3 sentences)."""
                 temperature=0.3
             )
             result = resp.choices[0].message.content.strip()
-            print("✅ AI analysis complete")
+            logger.info("Successfully got analysis from OpenAI")
             return result
 
         except RateLimitError as e:
@@ -49,22 +54,21 @@ Keep it concise (2-3 sentences)."""
             if any(keyword in error_msg for keyword in ['quota', 'billing', 'insufficient', 'exceeded your current']):
                 alert = f"🚨 *OpenAI API Quota Issue* 🚨\n\nStopped processing log group: `{name}`\nError: {str(e)}"
                 post_to_slack(alert)
-                print(f"❌ OpenAI quota exceeded: {e}")
+                logger.error(f"OpenAI quota exceeded: {e}")
                 raise RuntimeError(f"OpenAI quota exceeded: {e}")
 
             # Regular rate limiting - exponential backoff
             if attempt < max_retries - 1:
                 delay = base_delay * (2 ** attempt)
-                print(f"⏳ Rate limited (attempt {attempt + 1}/{max_retries}), retrying in {delay}s...")
+                logger.warning(f"Rate limited (attempt {attempt + 1}/{max_retries}), retrying in {delay}s...")
                 time.sleep(delay)
             else:
-                print("❌ Max retries exceeded for rate limiting")
+                logger.error("Max retries exceeded for rate limiting")
                 raise RuntimeError("Max retries exceeded for rate limiting")
 
         except Exception as e:
-            error_msg = f"❌ Error getting AI analysis: {str(e)[:100]}..."
-            print(error_msg)
-            return error_msg
+            logger.error(f"Unexpected error analyzing log group {name}: {e}")
+            return f"❌ Error analyzing log group: {str(e)[:100]}..."
 
     return "Failed to analyze after multiple attempts"
 
@@ -74,10 +78,10 @@ def post_to_slack(text: str):
     try:
         response = requests.post(SLACK_WEBHOOK_URL, json={"text": text}, timeout=10)
         response.raise_for_status()
-        print("✅ Posted to Slack successfully")
+        logger.info("Successfully posted to Slack")
         return True
     except requests.RequestException as e:
-        print(f"❌ Failed to post to Slack: {e}")
+        logger.error(f"Failed to post to Slack: {e}")
         return False
 
 
@@ -93,35 +97,69 @@ def fetch_log_groups():
     return resp.get("logGroups", [])
 
 
-if __name__ == "__main__":
-    print("🚀 Starting AI-Driven Log Remediation Tool")
-    
-    # Send startup notification to Slack
-    post_to_slack("🤖 AI Log Remediation Started - Analyzing CloudWatch log groups...")
-    
-    groups = fetch_log_groups()
-    print(f"Found {len(groups)} log groups")
-    
-    if groups:
-        # Analyze the first log group
-        first_group = groups[0]
-        log_name = first_group['logGroupName']
-        
-        print(f"Analyzing: {log_name}")
-        analysis = analyze_log_group(log_name)
-        
-        # Send analysis to Slack
-        slack_msg = f"""📊 *Log Group Analysis*
+def process_log_groups(limit=3):
+    """Process multiple log groups up to the specified limit"""
+    try:
+        groups = fetch_log_groups()
+        if not groups:
+            message = "🔍 No CloudWatch log groups found in the region."
+            logger.info(message)
+            post_to_slack(message)
+            return
 
-*Log Group:* `{log_name}`
+        total_groups = len(groups)
+        logger.info(f"Found {total_groups} log groups, processing first {min(limit, total_groups)}")
+        
+        # Process up to 'limit' groups
+        for i, group in enumerate(groups[:limit]):
+            log_group_name = group["logGroupName"]
+            creation_time = group.get("creationTime", "Unknown")
+            
+            logger.info(f"Processing log group {i+1}/{min(limit, total_groups)}: {log_group_name}")
+            
+            try:
+                explanation = analyze_log_group(log_group_name)
+                
+                # Format message for Slack
+                slack_msg = f"""📊 *Log Group Analysis #{i+1}*
+
+*Log Group:* `{log_group_name}`
+*Created:* {time.strftime('%Y-%m-%d', time.localtime(creation_time/1000)) if isinstance(creation_time, int) else creation_time}
 
 *🤖 AI Analysis:*
-{analysis}
-"""
-        post_to_slack(slack_msg)
-        print("✅ Analysis complete!")
+{explanation}
+
+---"""
+                
+                post_to_slack(slack_msg)
+                logger.info(f"Successfully processed: {log_group_name}")
+                
+                # Small delay between processing to be nice to APIs
+                time.sleep(2)
+                
+            except Exception as e:
+                error_msg = f"❌ Failed to process log group `{log_group_name}`: {str(e)}"
+                logger.error(error_msg)
+                post_to_slack(error_msg)
+                continue
         
-    else:
-        no_groups_msg = "🔍 No CloudWatch log groups found in the region."
-        print(no_groups_msg)
-        post_to_slack(no_groups_msg)
+        # Summary message
+        summary = f"✅ *Processing Complete!* \nAnalyzed {min(limit, total_groups)} of {total_groups} log groups."
+        post_to_slack(summary)
+        logger.info("Log group processing completed successfully")
+        
+    except Exception as e:
+        error_msg = f"🚨 *Critical Error* in log processing: {str(e)}"
+        logger.error(error_msg)
+        post_to_slack(error_msg)
+
+
+if __name__ == "__main__":
+    logger.info("🚀 Starting AI-Driven Log Remediation Tool")
+    
+    # Send startup notification
+    startup_msg = "🤖 *AI Log Remediation Started* \nBeginning analysis of CloudWatch log groups..."
+    post_to_slack(startup_msg)
+    
+    # Process log groups (limit to 3 to avoid spam and costs)
+    process_log_groups(limit=3)
