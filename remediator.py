@@ -2,23 +2,41 @@ import boto3
 import requests
 import time
 import logging
+import os
 from openai import OpenAI, RateLimitError
 
-from config import (
-    CLOUD_REGION,
-    CLOUD_ACCESS_KEY,
-    CLOUD_SECRET_KEY,
-    OPENAI_API_KEY,
-    SLACK_WEBHOOK_URL,
-)
+# Use environment variables for Lambda compatibility
+CLOUD_REGION = os.getenv('CLOUD_REGION', 'us-east-1')
+CLOUD_ACCESS_KEY = os.getenv('CLOUD_ACCESS_KEY')
+CLOUD_SECRET_KEY = os.getenv('CLOUD_SECRET_KEY')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+SLACK_WEBHOOK_URL = os.getenv('SLACK_WEBHOOK_URL')
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Fallback to config.py for local development
+if not CLOUD_ACCESS_KEY:
+    try:
+        from config import (
+            CLOUD_REGION as CONFIG_REGION,
+            CLOUD_ACCESS_KEY as CONFIG_ACCESS_KEY,
+            CLOUD_SECRET_KEY as CONFIG_SECRET_KEY,
+            OPENAI_API_KEY as CONFIG_OPENAI_KEY,
+            SLACK_WEBHOOK_URL as CONFIG_SLACK_URL,
+        )
+        CLOUD_REGION = CONFIG_REGION
+        CLOUD_ACCESS_KEY = CONFIG_ACCESS_KEY
+        CLOUD_SECRET_KEY = CONFIG_SECRET_KEY
+        OPENAI_API_KEY = CONFIG_OPENAI_KEY
+        SLACK_WEBHOOK_URL = CONFIG_SLACK_URL
+        logger.info("Using config.py for credentials")
+    except ImportError:
+        logger.error("No config.py found and environment variables not set")
+
 # Configure the OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
-
 
 def analyze_log_group(name: str) -> str:
     """Get AI analysis of a log group with retry logic"""
@@ -72,7 +90,6 @@ Keep it concise (2-3 sentences)."""
 
     return "Failed to analyze after multiple attempts"
 
-
 def post_to_slack(text: str):
     """Post message to Slack via webhook"""
     try:
@@ -84,18 +101,22 @@ def post_to_slack(text: str):
         logger.error(f"Failed to post to Slack: {e}")
         return False
 
-
 def fetch_log_groups():
     """Fetch CloudWatch log groups from AWS"""
-    aws_client = boto3.client(
-        "logs",
-        region_name=CLOUD_REGION,
-        aws_access_key_id=CLOUD_ACCESS_KEY,
-        aws_secret_access_key=CLOUD_SECRET_KEY,
-    )
+    # Use IAM role if running in Lambda, otherwise use provided credentials
+    if CLOUD_ACCESS_KEY and CLOUD_SECRET_KEY:
+        aws_client = boto3.client(
+            "logs",
+            region_name=CLOUD_REGION,
+            aws_access_key_id=CLOUD_ACCESS_KEY,
+            aws_secret_access_key=CLOUD_SECRET_KEY,
+        )
+    else:
+        # Use IAM role (for Lambda execution)
+        aws_client = boto3.client("logs", region_name=CLOUD_REGION)
+        
     resp = aws_client.describe_log_groups()
     return resp.get("logGroups", [])
-
 
 def process_log_groups(limit=3):
     """Process multiple log groups up to the specified limit"""
@@ -152,7 +173,6 @@ def process_log_groups(limit=3):
         error_msg = f"🚨 *Critical Error* in log processing: {str(e)}"
         logger.error(error_msg)
         post_to_slack(error_msg)
-
 
 if __name__ == "__main__":
     logger.info("🚀 Starting AI-Driven Log Remediation Tool")
