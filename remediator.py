@@ -2,6 +2,7 @@ import boto3
 import requests
 import time
 import logging
+import json
 import os
 from datetime import datetime
 from openai import OpenAI, RateLimitError
@@ -35,6 +36,7 @@ if not CLOUD_ACCESS_KEY:
         logger.info("Using config.py for credentials")
     except ImportError:
         logger.error("No config.py found and environment variables not set")
+        raise RuntimeError("Configuration not found")
 
 # Configure the OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -71,22 +73,25 @@ def put_custom_metric(metric_name, value, unit='Count', dimensions=None):
         logger.debug(f"✅ Sent metric: {metric_name}={value}")
         
     except Exception as e:
-        # Check if it's a permissions issue
+        # Check if it's a permissions issue and handle gracefully
         if "AccessDenied" in str(e) and "cloudwatch:PutMetricData" in str(e):
             logger.debug(f"⚠️  CloudWatch metrics disabled (no permissions): {metric_name}={value}")
+        elif "Unable to locate credentials" in str(e):
+            logger.debug(f"⚠️  CloudWatch metrics disabled (credentials issue): {metric_name}={value}")
         else:
             logger.error(f"❌ Failed to put metric {metric_name}: {e}")
 
 def analyze_log_group(name: str) -> dict:
-    """Get AI analysis of a log group with enhanced metrics"""
+    """Get AI analysis of a log group with enhanced error handling and metrics"""
     start_time = time.time()
     
     prompt = f"""Analyze this AWS CloudWatch log group: {name}
 
 Please provide a brief analysis covering:
 1. What type of AWS service this likely belongs to
-2. What kind of logs it probably contains
+2. What kind of logs it probably contains  
 3. Any potential issues or patterns to monitor
+4. Recommended retention period
 
 Keep it concise (2-3 sentences)."""
     
@@ -96,20 +101,23 @@ Keep it concise (2-3 sentences)."""
     for attempt in range(max_retries):
         try:
             logger.info(f"Calling OpenAI API for log group: {name} (attempt {attempt + 1})")
+            
             resp = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=150,
                 temperature=0.3
             )
+            
             result = resp.choices[0].message.content.strip()
             duration = time.time() - start_time
             
             # Send success metrics
             put_custom_metric('OpenAI_API_Success', 1)
             put_custom_metric('OpenAI_API_Duration', duration * 1000, 'Milliseconds')
+            put_custom_metric('OpenAI_API_Attempts', attempt + 1)
             
-            logger.info("Successfully got analysis from OpenAI")
+            logger.info(f"Successfully got analysis from OpenAI in {duration:.2f}s")
             return {
                 'success': True,
                 'analysis': result,
@@ -152,7 +160,7 @@ Keep it concise (2-3 sentences)."""
             logger.error(f"Unexpected error analyzing log group {name}: {e}")
             return {
                 'success': False,
-                'error': str(e),
+                'error': str(e)[:100],
                 'attempts': attempt + 1
             }
 
@@ -163,20 +171,32 @@ Keep it concise (2-3 sentences)."""
     }
 
 def post_to_slack(text: str):
-    """Post message to Slack via webhook with metrics"""
-    try:
-        response = requests.post(SLACK_WEBHOOK_URL, json={"text": text}, timeout=10)
-        response.raise_for_status()
-        put_custom_metric('Slack_Message_Success', 1)
-        logger.info("Successfully posted to Slack")
-        return True
-    except requests.RequestException as e:
-        put_custom_metric('Slack_Message_Failed', 1)
-        logger.error(f"Failed to post to Slack: {e}")
-        return False
+    """Post message to Slack via webhook with metrics and retries"""
+    max_retries = 3
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                SLACK_WEBHOOK_URL, 
+                json={"text": text}, 
+                timeout=10
+            )
+            response.raise_for_status()
+            put_custom_metric('Slack_Message_Success', 1)
+            logger.info("Successfully posted to Slack")
+            return True
+            
+        except requests.RequestException as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"Slack post failed (attempt {attempt + 1}), retrying: {e}")
+                time.sleep(2 ** attempt)  # Exponential backoff
+            else:
+                put_custom_metric('Slack_Message_Failed', 1)
+                logger.error(f"Failed to post to Slack after {max_retries} attempts: {e}")
+                return False
 
 def fetch_log_groups():
-    """Fetch CloudWatch log groups from AWS with metrics"""
+    """Fetch CloudWatch log groups from AWS with error handling and metrics"""
     try:
         # Use IAM role if running in Lambda, otherwise use provided credentials
         if CLOUD_ACCESS_KEY and CLOUD_SECRET_KEY:
@@ -194,6 +214,7 @@ def fetch_log_groups():
         log_groups = resp.get("logGroups", [])
         
         put_custom_metric('LogGroups_Found', len(log_groups))
+        logger.info(f"Found {len(log_groups)} log groups")
         return log_groups
         
     except Exception as e:
@@ -202,7 +223,7 @@ def fetch_log_groups():
         return []
 
 def process_log_groups(limit=3):
-    """Process multiple log groups with comprehensive monitoring"""
+    """Process multiple log groups with comprehensive monitoring and error handling"""
     start_time = time.time()
     
     try:
@@ -224,11 +245,13 @@ def process_log_groups(limit=3):
         
         successful_analyses = 0
         failed_analyses = 0
+        total_api_time = 0
         
         # Process up to 'limit' groups
         for i, group in enumerate(groups[:limit]):
             log_group_name = group["logGroupName"]
             creation_time = group.get("creationTime", "Unknown")
+            retention_days = group.get("retentionInDays", "Never expires")
             
             logger.info(f"Processing log group {i+1}/{processing_count}: {log_group_name}")
             
@@ -237,12 +260,20 @@ def process_log_groups(limit=3):
             
             if result['success']:
                 successful_analyses += 1
+                total_api_time += result['duration']
+                
+                # Format creation time
+                if isinstance(creation_time, int):
+                    formatted_time = time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(creation_time/1000))
+                else:
+                    formatted_time = str(creation_time)
                 
                 # Format message for Slack
                 slack_msg = f"""📊 *Log Group Analysis #{i+1}*
 
 *Log Group:* `{log_group_name}`
-*Created:* {time.strftime('%Y-%m-%d', time.localtime(creation_time/1000)) if isinstance(creation_time, int) else creation_time}
+*Created:* {formatted_time}
+*Retention:* {retention_days} days
 *Analysis Time:* {result['duration']:.2f}s (attempts: {result['attempts']})
 
 *🤖 AI Analysis:*
@@ -259,40 +290,84 @@ def process_log_groups(limit=3):
                 logger.error(error_msg)
                 post_to_slack(error_msg)
             
-            # Small delay between processing
-            time.sleep(2)
+            # Small delay between processing to be respectful to APIs
+            if i < processing_count - 1:  # Don't sleep after the last item
+                time.sleep(2)
         
-        # Send metrics
+        # Send comprehensive metrics
         put_custom_metric('LogGroups_Processed_Success', successful_analyses)
         put_custom_metric('LogGroups_Processed_Failed', failed_analyses)
+        put_custom_metric('Average_API_Time', 
+                         total_api_time / max(successful_analyses, 1), 'Seconds')
         
         # Summary message
         total_duration = time.time() - start_time
+        success_rate = (successful_analyses / processing_count) * 100 if processing_count > 0 else 0
+        
         summary = f"""✅ *Processing Complete!* 
 
 📈 **Summary:**
-- Analyzed: {successful_analyses}/{processing_count} log groups
-- Failed: {failed_analyses}
-- Total time: {total_duration:.2f}s
-- Total log groups available: {total_groups}"""
+• Analyzed: {successful_analyses}/{processing_count} log groups
+• Success Rate: {success_rate:.1f}%
+• Failed: {failed_analyses}
+• Total Duration: {total_duration:.2f}s
+• Avg Analysis Time: {total_api_time/max(successful_analyses, 1):.2f}s
+• Total Available: {total_groups} log groups
+
+🔍 *Next Steps:* Check CloudWatch metrics in the LogRemediation namespace for detailed monitoring."""
 
         post_to_slack(summary)
         put_custom_metric('Processing_Duration', total_duration, 'Seconds')
+        put_custom_metric('Processing_Success_Rate', success_rate, 'Percent')
         put_custom_metric('Processing_Completed', 1)
-        logger.info("Log group processing completed successfully")
+        
+        logger.info(f"Log group processing completed successfully: {successful_analyses}/{processing_count} processed")
         
     except Exception as e:
         error_msg = f"🚨 *Critical Error* in log processing: {str(e)}"
         logger.error(error_msg)
         post_to_slack(error_msg)
         put_custom_metric('Processing_Critical_Error', 1)
+        raise  # Re-raise to ensure Lambda reports the error
+
+def lambda_handler(event, context):
+    """Lambda entry point with proper error handling"""
+    logger.info("🚀 Starting AI-Driven Log Remediation Tool (Lambda mode)")
+    
+    try:
+        # Send startup notification
+        startup_msg = f"🤖 *AI Log Remediation Started* \nRegion: {CLOUD_REGION}\nExecution ID: {context.aws_request_id if context else 'local'}\nBeginning analysis of CloudWatch log groups..."
+        post_to_slack(startup_msg)
+        
+        # Process log groups
+        process_log_groups(limit=3)
+        
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                'message': 'Log remediation completed successfully',
+                'executionId': context.aws_request_id if context else 'local',
+                'region': CLOUD_REGION
+            })
+        }
+        
+    except Exception as e:
+        logger.error(f"Lambda execution failed: {e}")
+        put_custom_metric('Lambda_Execution_Failed', 1)
+        
+        return {
+            'statusCode': 500,
+            'body': json.dumps({
+                'error': str(e),
+                'executionId': context.aws_request_id if context else 'local'
+            })
+        }
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting AI-Driven Log Remediation Tool")
+    # For local testing
+    logger.info("🚀 Starting AI-Driven Log Remediation Tool (Local mode)")
     
-    # Send startup notification
-    startup_msg = "🤖 *AI Log Remediation Started* \nBeginning analysis of CloudWatch log groups..."
+    startup_msg = f"🤖 *AI Log Remediation Started* \nMode: Local Development\nRegion: {CLOUD_REGION}\nBeginning analysis of CloudWatch log groups..."
     post_to_slack(startup_msg)
     
-    # Process log groups (limit to 3 to avoid spam and costs)
     process_log_groups(limit=3)
