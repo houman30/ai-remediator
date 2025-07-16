@@ -1,131 +1,98 @@
 # AI Log Remediation Tool
 
-A DevOps project that analyzes AWS CloudWatch log groups using OpenAI and sends insights via Slack. Built with modern DevOps practices including containerization, CI/CD, and infrastructure as code.
-
-## Architecture
-
-```
-GitHub Actions → Docker/ECR → AWS Lambda → CloudWatch Logs
-                                    ↓
-                               OpenAI Analysis
-                                    ↓
-                              Slack Notifications
-```
-
-## Tech Stack
-
-- **Runtime**: Python 3.10, AWS Lambda
-- **AI**: OpenAI GPT-3.5 for log analysis  
-- **Infrastructure**: Docker, Terraform, GitHub Actions
-- **Monitoring**: CloudWatch metrics and alerts
-- **Notifications**: Slack integration
-
-## DevOps Features
-
-- **Containerization** - Docker with security best practices
-- **CI/CD Pipeline** - Automated testing and deployment
-- **Infrastructure as Code** - Terraform for AWS resources
-- **Monitoring** - Custom CloudWatch metrics
-- **Error Handling** - Exponential backoff and graceful degradation
-
-## Quick Start
-
-### Local Development
-```bash
-# Setup
-git clone <repo-url>
-cd ai-remediator
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-
-# Configure
-cp config.py.template config.py
-# Add your API keys to config.py
-
-# Run
-python remediator.py
-```
-
-### Docker
-```bash
-docker build -t log-remediation .
-docker run -e OPENAI_API_KEY=your_key \
-           -e SLACK_WEBHOOK_URL=your_webhook \
-           log-remediation
-```
-
-## Configuration
-
-Set these environment variables:
-- `CLOUD_REGION` - AWS region (default: us-east-1)
-- `OPENAI_API_KEY` - OpenAI API key
-- `SLACK_WEBHOOK_URL` - Slack webhook for notifications
-- `CLOUD_ACCESS_KEY` / `CLOUD_SECRET_KEY` - AWS credentials (local only)
+A Python application that analyzes AWS CloudWatch log groups using OpenAI and sends insights via Slack.
 
 ## What It Does
 
-1. **Fetches** CloudWatch log groups from AWS
-2. **Analyzes** each log group using OpenAI GPT-3.5
-3. **Reports** findings via Slack with timing metrics
-4. **Tracks** performance in CloudWatch metrics
-5. **Handles** errors gracefully with retry logic
+1. Fetches CloudWatch log groups from your AWS account
+2. Analyzes each log group using OpenAI GPT-3.5
+3. Sends analysis results to Slack with timing information
+4. Handles API rate limits and errors gracefully
 
-## Deployment
+## Tech Stack
 
-### Manual
-```bash
-# Deploy infrastructure
-cd terraform && terraform apply
-
-# Deploy code via CI/CD
-git push origin main
-```
-
-### Automated
-- Push to `main` triggers GitHub Actions
-- Tests code quality and builds Docker image
-- Pushes to AWS ECR and updates Lambda
-
-## Monitoring
-
-Tracks key metrics in CloudWatch:
-- API response times and success rates
-- Processing duration and throughput  
-- Error rates and retry attempts
-- Slack notification delivery
-
-## Why This Project?
-
-**Demonstrates real DevOps skills:**
-- Building production-ready applications
-- Implementing proper CI/CD pipelines
-- Managing cloud infrastructure with code
-- Creating observable, maintainable systems
-
-**Business value:**
-- Automates manual log analysis
-- Provides consistent insights across teams
-- Reduces time to identify log issues
+- **Python 3.10** - Main application runtime
+- **OpenAI API** - GPT-3.5 for log analysis
+- **AWS SDK (boto3)** - CloudWatch logs access
+- **Slack API** - Notifications
+- **Docker** - Containerization
 
 ## Project Structure
 
 ```
 ai-remediator/
-├── remediator.py              # Main application
-├── Dockerfile                # Container definition  
-├── requirements.txt          # Dependencies
-├── .github/workflows/ci.yml  # CI/CD pipeline
-├── terraform/               # Infrastructure code
-└── config.py.template      # Configuration template
+├── remediator.py           # Main application logic
+├── Dockerfile             # Container definition
+├── .dockerignore          # Docker build optimization
+├── requirements.txt       # Python dependencies
+├── config.py.template     # Configuration template
+└── README.md             # This file
 ```
 
-## Next Steps
+## Setup
 
-- Multi-region support
-- Custom analysis prompts
-- Cost optimization dashboard
-- Integration with incident management tools
+### Prerequisites
+- AWS account with CloudWatch access
+- OpenAI API key
+- Slack webhook URL
+- Python 3.10+
+- Docker (optional)
 
-## License
+### Local Development
+```bash
+# Clone and setup
+git clone <your-repo-url>
+cd ai-remediator
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+pip install -r requirements.txt
 
-MIT License - see [LICENSE](LICENSE) file for details.
+# Configure credentials
+cp config.py.template config.py
+# Edit config.py with your actual API keys
+
+# Run the application
+python remediator.py
+```
+
+### Docker Usage
+```bash
+# Build the container
+docker build -t log-remediation .
+
+# Option 1: Run with config file (easier for development)
+docker run -v $(pwd)/config.py:/app/config.py log-remediation
+
+# Option 2: Run with environment variables (more Docker-native)
+docker run -e CLOUD_REGION=us-east-1 \
+           -e OPENAI_API_KEY=your_openai_key \
+           -e SLACK_WEBHOOK_URL=your_slack_webhook \
+           -e CLOUD_ACCESS_KEY=your_aws_key \
+           -e CLOUD_SECRET_KEY=your_aws_secret \
+           log-remediation
+```
+
+## Configuration
+
+### Environment Variables
+- `CLOUD_REGION` - AWS region (default: us-east-1)
+- `OPENAI_API_KEY` - OpenAI API key (required)
+- `SLACK_WEBHOOK_URL` - Slack webhook URL (required)
+- `CLOUD_ACCESS_KEY` - AWS access key
+- `CLOUD_SECRET_KEY` - AWS secret key
+
+## Features
+
+- **Smart retry logic** - Exponential backoff for API failures
+- **Error handling** - Graceful degradation when permissions are missing
+- **Environment variables** - Supports both local config and environment variables
+- **Docker support** - Containerized execution with security best practices
+- **Configurable limits** - Process up to 3 log groups by default to control costs
+
+## Error Handling
+
+The application includes:
+- **Exponential backoff** for OpenAI API rate limits
+- **Graceful degradation** when CloudWatch metrics permissions are missing
+- **Comprehensive logging** with timestamps and error details
+- **Slack alerts** for critical failures like API quota issues

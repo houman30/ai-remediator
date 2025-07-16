@@ -1,0 +1,13 @@
+# Configuration template for AI Log Remediation Tool
+# Copy this file to config.py and replace with your actual values
+
+# AWS Configuration
+CLOUD_REGION = "us-east-1"
+CLOUD_ACCESS_KEY = "your-aws-access-key-here"
+CLOUD_SECRET_KEY = "your-aws-secret-key-here"
+
+# OpenAI Configuration
+OPENAI_API_KEY = "your-openai-api-key-here"
+
+# Slack Configuration
+SLACK_WEBHOOK_URL = "your-slack-webhook-url-here"
