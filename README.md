@@ -41,7 +41,7 @@ ai-remediator/
 ### Local Development
 ```bash
 # Clone and setup
-git clone <your-repo-url>
+git clone https://github.com/houman30/ai-remediator.git
 cd ai-remediator
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
